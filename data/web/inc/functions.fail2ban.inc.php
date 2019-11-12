@@ -9,9 +9,15 @@ function valid_network($network) {
   }
   return false;
 }
+
+function valid_hostname($hostname) {
+    return filter_var($hostname, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME);
+}
+
 function fail2ban($_action, $_data = null) {
   global $redis;
   global $lang;
+  $_data_log = $_data;
   switch ($_action) {
     case 'get':
       $f2b_options = array();
@@ -26,7 +32,7 @@ function fail2ban($_action, $_data = null) {
             $tmp_wl_data[] = $key;
           }
           if (isset($tmp_wl_data)) {
-            sort($tmp_wl_data);
+            natsort($tmp_wl_data);
             $f2b_options['whitelist'] = implode(PHP_EOL, $tmp_wl_data);
           }
           else {
@@ -42,7 +48,7 @@ function fail2ban($_action, $_data = null) {
             $tmp_bl_data[] = $key;
           }
           if (isset($tmp_bl_data)) {
-            sort($tmp_bl_data);
+            natsort($tmp_bl_data);
             $f2b_options['blacklist'] = implode(PHP_EOL, $tmp_bl_data);
           }
           else {
@@ -79,9 +85,10 @@ function fail2ban($_action, $_data = null) {
         }
       }
       catch (RedisException $e) {
-        $_SESSION['return'] = array(
+        $_SESSION['return'][] = array(
           'type' => 'danger',
-          'msg' => 'Redis: '.$e
+          'log' => array(__FUNCTION__, $_action, $_data_log),
+          'msg' => array('redis_error', $e)
         );
         return false;
       }
@@ -89,37 +96,67 @@ function fail2ban($_action, $_data = null) {
     break;
     case 'edit':
       if ($_SESSION['mailcow_cc_role'] != "admin") {
-        $_SESSION['return'] = array(
+        $_SESSION['return'][] = array(
           'type' => 'danger',
-          'msg' => sprintf($lang['danger']['access_denied'])
+          'log' => array(__FUNCTION__, $_action, $_data_log),
+          'msg' => 'access_denied'
         );
         return false;
       }
       if (isset($_data['action']) && !empty($_data['network'])) {
         $networks = (array) $_data['network'];
         foreach ($networks as $network) {
-          if ($_data['action'] == "unban") {
-            if (valid_network($network)) {
-              $redis->hSet('F2B_QUEUE_UNBAN', $network, 1);
+          try {
+            if ($_data['action'] == "unban") {
+              if (valid_network($network)) {
+                $redis->hSet('F2B_QUEUE_UNBAN', $network, 1);
+              }
+            }
+            elseif ($_data['action'] == "whitelist") {
+              if (valid_network($network)) {
+                $redis->hSet('F2B_WHITELIST', $network, 1);
+                $redis->hDel('F2B_BLACKLIST', $network, 1);
+                $redis->hSet('F2B_QUEUE_UNBAN', $network, 1);
+              }
+              else  {
+                $_SESSION['return'][] = array(
+                  'type' => 'danger',
+                  'log' => array(__FUNCTION__, $_action, $_data_log),
+                  'msg' => array('network_host_invalid', $network)
+                );
+                continue;
+              }
+            }
+            elseif ($_data['action'] == "blacklist") {
+              if (valid_network($network)) {
+                $redis->hSet('F2B_BLACKLIST', $network, 1);
+                $redis->hDel('F2B_WHITELIST', $network, 1);
+                //$response = docker('post', 'netfilter-mailcow', 'restart');
+              }
+              else  {
+                $_SESSION['return'][] = array(
+                  'type' => 'danger',
+                  'log' => array(__FUNCTION__, $_action, $_data_log),
+                  'msg' => array('network_host_invalid', $network)
+                );
+                continue;
+              }
             }
           }
-          elseif ($_data['action'] == "whitelist") {
-            if (valid_network($network)) {
-              $redis->hSet('F2B_WHITELIST', $network, 1);
-              $redis->hDel('F2B_BLACKLIST', $network, 1);
-              $redis->hSet('F2B_QUEUE_UNBAN', $network, 1);
-            }
+          catch (RedisException $e) {
+            $_SESSION['return'][] = array(
+              'type' => 'danger',
+              'log' => array(__FUNCTION__, $_action, $_data_log),
+              'msg' => array('redis_error', $e)
+            );
+            continue;
           }
-          elseif ($_data['action'] == "blacklist") {
-            if (valid_network($network)) {
-              $redis->hSet('F2B_BLACKLIST', $network, 1);
-            }
-          }
+          $_SESSION['return'][] = array(
+            'type' => 'success',
+            'log' => array(__FUNCTION__, $_action, $_data_log),
+            'msg' => array('object_modified', htmlspecialchars($network))
+          );
         }
-        $_SESSION['return'] = array(
-          'type' => 'success',
-          'msg' => sprintf($lang['success']['object_modified'], htmlspecialchars(implode(', ', $networks)))
-        );
         return true;
       }
       $is_now = fail2ban('get');
@@ -133,9 +170,10 @@ function fail2ban($_action, $_data = null) {
         $bl = (isset($_data['blacklist'])) ? $_data['blacklist'] : $is_now['blacklist'];
       }
       else {
-        $_SESSION['return'] = array(
+        $_SESSION['return'][] = array(
           'type' => 'danger',
-          'msg' => sprintf($lang['danger']['access_denied'])
+          'log' => array(__FUNCTION__, $_action, $_data_log),
+          'msg' => 'access_denied'
         );
         return false;
       }
@@ -155,7 +193,7 @@ function fail2ban($_action, $_data = null) {
           $wl_array = array_map('trim', preg_split( "/( |,|;|\n)/", $wl));
           if (is_array($wl_array)) {
             foreach ($wl_array as $wl_item) {
-              if (valid_network($wl_item)) {
+              if (valid_network($wl_item) || valid_hostname($wl_item)) {
                 $redis->hSet('F2B_WHITELIST', $wl_item, 1);
               }
             }
@@ -165,7 +203,7 @@ function fail2ban($_action, $_data = null) {
           $bl_array = array_map('trim', preg_split( "/( |,|;|\n)/", $bl));
           if (is_array($bl_array)) {
             foreach ($bl_array as $bl_item) {
-              if (valid_network($bl_item)) {
+              if (valid_network($bl_item) || valid_hostname($bl_item)) {
                 $redis->hSet('F2B_BLACKLIST', $bl_item, 1);
               }
             }
@@ -173,15 +211,17 @@ function fail2ban($_action, $_data = null) {
         }
       }
       catch (RedisException $e) {
-        $_SESSION['return'] = array(
+        $_SESSION['return'][] = array(
           'type' => 'danger',
-          'msg' => 'Redis: '.$e
+          'log' => array(__FUNCTION__, $_action, $_data_log),
+          'msg' => array('redis_error', $e)
         );
         return false;
       }
-      $_SESSION['return'] = array(
+      $_SESSION['return'][] = array(
         'type' => 'success',
-        'msg' => sprintf($lang['success']['f2b_modified'])
+        'log' => array(__FUNCTION__, $_action, $_data_log),
+        'msg' => 'f2b_modified'
       );
     break;
   }

@@ -1,9 +1,9 @@
 dns {
   enable_dnssec = true;
 }
-map_watch_interval = 30s;
+map_watch_interval = 5min;
 dns {
-  timeout = 15s;
-  retransmits = 5;
+  timeout = 4s;
+  retransmits = 2;
 }
-disable_monitored = true;
+disable_monitoring = true;
